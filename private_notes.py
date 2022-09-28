@@ -1,7 +1,13 @@
 import pickle
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+import os, time
 
 class PrivNotes:
-  MAX_NOTE_LEN = 2048;
+  MAX_NOTE_LEN = 2048
 
   def __init__(self, password, data = None, checksum = None):
     """Constructor.
@@ -17,9 +23,17 @@ class PrivNotes:
     Raises:
       ValueError : malformed serialized format
     """
+
     self.kvs = {}
     if data is not None:
       self.kvs = pickle.loads(bytes.fromhex(data))
+      self.salt = self.kvs['salt']
+    else:
+      self.salt = os.urandom(16)
+    
+    kdf = PBKDF2HMAC(algorithm = hashes.SHA256(), length = 32, salt = self.salt, iterations = 2000000, backend=default_backend())
+    self.key = kdf.derive(bytes(password, 'ascii'))
+    self.aesgcm = AESCCM(self.key)
 
   def dump(self):
     """Computes a serialized representation of the notes database
@@ -64,7 +78,8 @@ class PrivNotes:
     """
     if len(note) > self.MAX_NOTE_LEN:
       raise ValueError('Maximum note length exceeded')
-    
+    nonce = time.time_ns()
+    ciphertext = self.aesgcm.encrypt(os.timnote)
     self.kvs[title] = note
 
 
