@@ -1,4 +1,5 @@
 from private_notes import PrivNotes
+import pickle
 
 import re
 
@@ -38,6 +39,20 @@ data, checksum = priv_notes.dump()
 
 print('Loading notes')
 new_notes_instance = PrivNotes('123456', data, checksum)
+for title in kvs:
+  note1 = priv_notes.get(title)
+  note2 = new_notes_instance.get(title)
+  if note1 != note2:
+    error('get mismatch for title %s (received values %s and %s)' % (title, note1, note2))
+
+print('Swap attack')
+tampered = pickle.loads(bytes.fromhex(data))
+keys = list(tampered.keys())
+tmp = tampered[keys[1]]
+tampered[keys[1]] = tampered[keys[2]]
+tampered[keys[2]] = tmp
+tampered_bytes = pickle.dumps(tampered).hex()
+new_notes_instance = PrivNotes('123456', tampered_bytes)
 for title in kvs:
   note1 = priv_notes.get(title)
   note2 = new_notes_instance.get(title)

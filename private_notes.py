@@ -1,9 +1,9 @@
 import pickle
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import os, time
 
 class PrivNotes:
@@ -26,14 +26,25 @@ class PrivNotes:
 
     self.kvs = {}
     if data is not None:
+      # TODO check checksum
       self.kvs = pickle.loads(bytes.fromhex(data))
+      h = hashes.Hash(hashes.SHA256())
+      data = pickle.dumps(self.kvs)
+      h.update(data)
+      ck = h.finalize()
+      if checksum and ck != checksum:
+        raise ValueError('Checksum does not match data')
+      
       self.salt = self.kvs['salt']
     else:
       self.salt = os.urandom(16)
+      self.kvs['salt'] = self.salt
     
     kdf = PBKDF2HMAC(algorithm = hashes.SHA256(), length = 32, salt = self.salt, iterations = 2000000, backend=default_backend())
     self.key = kdf.derive(bytes(password, 'ascii'))
-    self.aesgcm = AESCCM(self.key)
+    self.aesgcm = AESGCM(self.key)
+    self.hmac_key = self.key
+    self.consistent = True
 
   def dump(self):
     """Computes a serialized representation of the notes database
@@ -45,7 +56,11 @@ class PrivNotes:
       checksum (str) : a hex-encoded checksum for the data used to protect
                        against rollback attacks (up to 32 characters in length)
     """
-    return pickle.dumps(self.kvs).hex(), ''
+    h = hashes.Hash(hashes.SHA256())
+    data = pickle.dumps(self.kvs)
+    h.update(data)
+    checksum = h.finalize()
+    return data.hex(), checksum
 
   def get(self, title):
     """Fetches the note associated with a title.
@@ -57,8 +72,14 @@ class PrivNotes:
       note (str) : the note associated with the requested title if
                        it exists and otherwise None
     """
-    if title in self.kvs:
-      return self.kvs[title]
+    h = hmac.HMAC(self.hmac_key, hashes.SHA256())
+    h.update(bytes(title, 'ascii'))
+    signature = h.finalize()
+    if signature in self.kvs:
+      ctext, nonce = self.kvs[signature]
+      message = self.aesgcm.decrypt(nonce, ctext, signature)
+      message = message.decode('ascii')
+      return message.strip()
     return None
 
   def set(self, title, note):
@@ -78,9 +99,21 @@ class PrivNotes:
     """
     if len(note) > self.MAX_NOTE_LEN:
       raise ValueError('Maximum note length exceeded')
-    nonce = time.time_ns()
-    ciphertext = self.aesgcm.encrypt(os.timnote)
-    self.kvs[title] = note
+
+    padding = b"\x20"*(self.MAX_NOTE_LEN-len(note))
+    note_bytes = bytes(note, 'ascii') + padding
+
+    nonce = time.time_ns().to_bytes(8, 'little')
+    hf = Cipher(algorithms.AES(self.key[:128]), modes.ECB())
+    enc = hf.encryptor()
+    nonce = enc.update(nonce+(b"\x01"*8)) + enc.finalize()   # Put the time through a PRP so the timestamp isn't in cleartext
+    
+    h = hmac.HMAC(self.hmac_key, hashes.SHA256())
+    h.update(bytes(title, 'ascii'))
+    signature = h.finalize()
+
+    ciphertext = self.aesgcm.encrypt(nonce, note_bytes, signature)
+    self.kvs[signature] = (ciphertext, nonce)
 
 
   def remove(self, title):
@@ -93,8 +126,11 @@ class PrivNotes:
          success (bool) : True if the title was removed and False if the title was
                           not found
     """
-    if title in self.kvs:
-      del self.kvs[title]
+    h = hmac.HMAC(self.key, hashes.SHA256())
+    h.update(bytes(title, 'ascii'))
+    signature = h.finalize()
+    if signature in self.kvs:
+      del self.kvs[signature]
       return True
 
     return False
